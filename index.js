@@ -50,8 +50,32 @@ app.post("/evaluate-choice", async (req, res) => {
 });
 
 app.get("/generate-backstory", async (req, res) => {
-  const { backstory } = await generateBackstory();
-  res.json({ backstory });
+  const {
+    name,
+    gender,
+    location,
+    situation,
+    mother,
+    motherAge,
+    motherRelationship,
+    father,
+    fatherAge,
+    fatherRelationship,
+    siblings,
+  } = await generateBackstory();
+  res.json({
+    name,
+    gender,
+    location,
+    situation,
+    mother,
+    motherAge,
+    motherRelationship,
+    father,
+    fatherAge,
+    fatherRelationship,
+    siblings,
+  });
 });
 
 app.listen(port, () => {
@@ -184,7 +208,7 @@ Now create the scenario, choices, and choice stats in the appropriate XML format
     const data = await response.json();
     const generatedText = data.candidates[0].content.parts[0].text;
 
-    // console.log("Generated Text:", generatedText);
+    console.log("Generated Text:", generatedText);
     let scenario = "";
     let choices = [];
     try {
@@ -609,6 +633,7 @@ Example 2:
       }
     }
 
+    console.log("Siblings", siblings);
     return {
       name,
       gender,
