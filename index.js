@@ -2,8 +2,16 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const argon2 = require("argon2");
+const jwt = require("jsonwebtoken");
+const db = require("./db"); // Import the database connection
+const { v4: uuidv4 } = require("uuid");
+
 const app = express();
 const port = 3000;
+const cookieParser = require("cookie-parser");
+const passport = require("passport");
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
 const GOOGLE_API_KEY = process.env.GEMINI_API_KEY;
 const API_ENDPOINT =
@@ -11,42 +19,682 @@ const API_ENDPOINT =
 
 app.use(
   cors({
-    origin: "http://localhost:5173",
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    origin: process.env.FRONTEND_URL,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
     credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
 app.use(express.json());
+app.use(cookieParser());
+
+app.use(passport.initialize());
+
+const createToken = (user) => {
+  return jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
+    expiresIn: "7d",
+  });
+};
+
+const createRefreshToken = (user) => {
+  return jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
+    expiresIn: "7d",
+  });
+};
+
+/* Google Login */
+
+// Set up Passport Google Strategy
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      callbackURL: "/auth/google/callback",
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        // First, try to find an existing user by Google ID
+        let result = await db.query(
+          "SELECT id, email, google_id, created_at, oauth_provider, last_login FROM users WHERE google_id = $1",
+          [profile.id]
+        );
+
+        let user;
+
+        if (result.rows.length > 0) {
+          // User exists with Google ID, update their information
+          user = result.rows[0];
+          await db.query(
+            "UPDATE users SET email = $1, last_login = NOW() WHERE google_id = $2",
+            [profile.emails[0].value, profile.id]
+          );
+        } else {
+          // User doesn't exist with Google ID, check if they exist by email
+          result = await db.query(
+            "SELECT id, email, google_id, created_at, oauth_provider, last_login FROM users WHERE email = $1",
+            [profile.emails[0].value]
+          );
+
+          if (result.rows.length > 0) {
+            // User exists with email, update their Google ID and oauth_provider
+            user = result.rows[0];
+            await db.query(
+              "UPDATE users SET google_id = $1, oauth_provider = 'google', last_login = NOW() WHERE id = $2",
+              [profile.id, user.id]
+            );
+          } else {
+            // User doesn't exist, create a new one
+            result = await db.query(
+              `INSERT INTO users (google_id, email, oauth_provider, created_at, last_login)
+               VALUES ($1, $2, 'google', NOW(), NOW())
+               RETURNING id, email, google_id, created_at, oauth_provider, last_login`,
+              [profile.id, profile.emails[0].value]
+            );
+            user = result.rows[0];
+          }
+        }
+
+        done(null, user);
+      } catch (error) {
+        console.error("Error in Google Strategy:", error);
+        done(error, null);
+      }
+    }
+  )
+);
+
+// Routes
+app.get(
+  "/auth/google",
+  passport.authenticate("google", { scope: ["profile", "email"] })
+);
+
+app.get(
+  "/auth/google/callback",
+  passport.authenticate("google", { session: false }),
+  async (req, res) => {
+    const user = req.user;
+    const token = createToken(user);
+    const refreshToken = createRefreshToken(user);
+
+    await db.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [
+      refreshToken,
+      user.id,
+    ]);
+
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.redirect("http://localhost:5173/");
+  }
+);
+
+// Local registration route
+app.post("/auth/register", async (req, res) => {
+  const { email, password } = req.body;
+  console.log("Registering user", email, password);
+  try {
+    const hashedPassword = await argon2.hash(password);
+    const result = await db.query(
+      `INSERT INTO users (email, password, oauth_provider, created_at, last_login)
+       VALUES ($1, $2, 'local', NOW(), NOW())
+       RETURNING id, email`,
+      [email, hashedPassword]
+    );
+    const user = result.rows[0];
+    const token = createToken(user);
+    const refreshToken = createRefreshToken(user);
+
+    await db.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [
+      refreshToken,
+      user.id,
+    ]);
+
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.status(201).json({ message: "User registered successfully", user });
+  } catch (error) {
+    console.log("Error registering user", error);
+    res.status(500).json({ error: `Error registering user: ${error}` });
+  }
+});
+
+// Local login route
+app.post("/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+  console.log("Logging in with email", email);
+  try {
+    const result = await db.query("SELECT * FROM users WHERE email = $1", [
+      email,
+    ]);
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    if (user.oauth_provider === "google") {
+      return res.status(400).json({
+        error:
+          "This account uses Google Sign-In. Please use the Google Sign-In option.",
+      });
+    }
+
+    if (!user.password || !(await argon2.verify(user.password, password))) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const token = createToken(user);
+    const refreshToken = createRefreshToken(user);
+
+    await db.query(
+      "UPDATE users SET refresh_token = $1, last_login = NOW() WHERE id = $2",
+      [refreshToken, user.id]
+    );
+
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.json({
+      message: "Logged in successfully",
+      user: {
+        id: user.id,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error("Error logging in:", error);
+    res.status(500).json({ error: "Error logging in" });
+  }
+});
+
+// Middleware to verify JWT
+const verifyToken = (req, res, next) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ error: "Access denied" });
+
+  try {
+    const verified = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = verified;
+    next();
+  } catch (err) {
+    if (err instanceof jwt.TokenExpiredError) {
+      return res
+        .status(401)
+        .json({ error: "Token expired", shouldRefresh: true });
+    }
+    res.status(400).json({ error: "Invalid token" });
+  }
+};
+
+// Token refresh route
+app.post("/auth/refresh-token", async (req, res) => {
+  const refreshToken = req.cookies.refreshToken;
+  if (!refreshToken)
+    return res.status(401).json({ error: "Refresh token not found" });
+
+  try {
+    const verified = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+    const result = await db.query(
+      "SELECT * FROM users WHERE id = $1 AND refresh_token = $2",
+      [verified.userId, refreshToken]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(403).json({ error: "Invalid refresh token" });
+    }
+
+    const user = result.rows[0];
+    const newToken = createToken(user);
+    const newRefreshToken = createRefreshToken(user);
+
+    await db.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [
+      newRefreshToken,
+      user.id,
+    ]);
+
+    res.cookie("token", newToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.cookie("refreshToken", newRefreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+    res.json({ message: "Token refreshed successfully" });
+  } catch (err) {
+    res.status(400).json({ error: "Invalid refresh token" });
+  }
+});
+
+// Logout route
+app.get("/auth/logout", async (req, res) => {
+  const refreshToken = req.cookies.refreshToken;
+  if (refreshToken) {
+    await db.query(
+      "UPDATE users SET refresh_token = NULL WHERE refresh_token = $1",
+      [refreshToken]
+    );
+  }
+  res.clearCookie("token");
+  res.clearCookie("refreshToken");
+  res.json({ message: "Logged out successfully" });
+});
+
+// User info route
+app.get("/api/user", verifyToken, async (req, res) => {
+  console.log("Getting user info");
+  try {
+    const result = await db.query(
+      "SELECT id, email, oauth_provider FROM users WHERE id = $1",
+      [req.user.userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: "Error fetching user data" });
+  }
+});
+
+/* User Routes */
+
+// List all users
+app.get("/users", async (req, res) => {
+  console.log("getting users");
+  try {
+    const result = await db.query("SELECT * FROM users");
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Database error" });
+  }
+});
+
+// Create a new user
+app.post("/users", async (req, res) => {
+  console.log("posting to users");
+  const { email, password } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ message: "Email is required" });
+  }
+
+  try {
+    const result = await db.query(
+      "INSERT INTO users (  email, password) VALUES ($1, $2 ) RETURNING *",
+      [email, password]
+    );
+
+    // Return the created user (excluding the password)
+    const { password: _, ...user } = result.rows[0];
+
+    res.status(201).json({ message: "User created!", user: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Database error" });
+  }
+});
+
+// Update a user's details
+app.patch("/users/:id", async (req, res) => {
+  console.log("patching to users");
+  const { id } = req.params;
+  const { email, password } = req.body;
+
+  // Build the dynamic SQL query based on the provided fields
+  const updates = [];
+  if (email) updates.push(`email = '${email}'`);
+  if (password) {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    updates.push(`password = '${hashedPassword}'`);
+  }
+
+  if (updates.length === 0) {
+    return res
+      .status(400)
+      .json({ message: "No valid fields provided for update" });
+  }
+
+  try {
+    const query = `UPDATE users SET ${updates.join(
+      ", "
+    )} WHERE id = $1 RETURNING *`;
+    const result = await db.query(query, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const { password: _, ...user } = result.rows[0]; // Exclude password from response
+    res.json({ message: "User updated!", user });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Database error" });
+  }
+});
+
+// Delete a user
+app.delete("/users/:id", async (req, res) => {
+  console.log("deleting user");
+  const { id } = req.params;
+
+  try {
+    // Run the SQL query to delete the user
+    const result = await db.query(
+      "DELETE FROM users WHERE id = $1 RETURNING *",
+      [id]
+    );
+
+    // If no user was found, return 404
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Return a success message
+    res.json({ message: "User deleted", user: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Database error" });
+  }
+});
+
+/* Game Routes */
+
+app.get("/games", verifyToken, async (req, res) => {
+  const userId = req.user.userId;
+  console.log("Getting games for user", userId);
+  try {
+    const result = await db.query("SELECT * FROM games WHERE user_id = $1", [
+      userId,
+    ]);
+    console.log("Got games", result.rows);
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Database error in Get Games", error });
+  }
+});
+
+app.post("/save-game", verifyToken, async (req, res) => {
+  const userId = req.user.userId;
+  const {
+    age,
+    location,
+    netWorth,
+    name,
+    stats,
+    lifeEvents,
+    history,
+    inventory,
+  } = req.body;
+  const gameId = uuidv4();
+  console.log("Creating new game", req.body);
+  try {
+    const result = await db.query(
+      "INSERT INTO games (id, user_id, age, location, net_worth, name, stats, life_events, history, inventory, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW()) RETURNING *",
+      [
+        gameId,
+        userId,
+        age,
+        location,
+        netWorth,
+        name,
+        JSON.stringify(stats),
+        lifeEvents,
+        history,
+        inventory,
+      ]
+    );
+    res.json({
+      message: "Game created",
+      game: result.rows[0],
+    });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ message: "Database error in post to Save Game", error });
+  }
+});
+
+app.put("/save-game", verifyToken, async (req, res) => {
+  console.log("Putting game state");
+  const userId = req.user.userId;
+  const {
+    gameId,
+    age,
+    location,
+    netWorth,
+    name,
+    stats,
+    lifeEvents,
+    history,
+    inventory,
+  } = req.body;
+  console.log("Saving game state");
+  console.log("Age", age);
+  console.log("Location", location);
+  console.log("Net worth", netWorth);
+  console.log("Name", name);
+  console.log("Stats", stats);
+  console.log("Life events", lifeEvents);
+  console.log("History", history);
+  console.log("Inventory", inventory);
+
+  try {
+    const result = await db.query(
+      `UPDATE games SET age = $3, location = $4, net_worth = $5, name = $6, stats = $7, life_events = $8, history = $9, inventory = $10, updated_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING *`,
+      [
+        gameId,
+        userId,
+        age,
+        location,
+        netWorth,
+        name,
+        stats,
+        lifeEvents,
+        history,
+        inventory,
+      ]
+    );
+    console.log("Game state saved", result.rows[0]);
+    res.json({
+      message: "Game state saved",
+      gameState: result.rows[0],
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Database error" });
+  }
+});
+
+app.delete("/save-game", verifyToken, async (req, res) => {
+  const userId = req.user.userId;
+  const { gameId } = req.body;
+  try {
+    const result = await db.query(
+      "DELETE FROM games WHERE id = $1 AND user_id = $2",
+      [gameId, userId]
+    );
+    res.json({ message: "Game deleted", gameId });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Database error in Patch Save Game" });
+  }
+});
+
+app.get("/relationships", verifyToken, async (req, res) => {
+  const userId = req.user.userId;
+  const { gameId } = req.query;
+  try {
+    const result = await db.query(
+      "SELECT * FROM relationships WHERE game_id = $1 AND user_id = $2",
+      [gameId, userId]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Database error" });
+  }
+});
+
+app.post("/relationships", verifyToken, async (req, res) => {
+  const { userId } = req.user; // Authenticated user's ID
+  const { relationships, gameId } = req.body; // relationships will be an array of relationship objects
+
+  console.log("Saving new relationships", relationships, gameId);
+
+  // Validate that the user owns the game
+  const gameResult = await db.query(
+    "SELECT * FROM games WHERE id = $1 AND user_id = $2",
+    [gameId, userId]
+  );
+  if (gameResult.rows.length === 0) {
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+
+  const savedRelationships = [];
+  try {
+    // Insert each relationship into the database
+    for (const relationship of relationships) {
+      const {
+        name,
+        age,
+        gender,
+        relationship: relationshipType,
+        relationshipStatus,
+      } = relationship;
+
+      const result = await db.query(
+        `INSERT INTO relationships (games_id, name, age, gender, relationship, relationship_status)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [gameId, name, age, gender, relationshipType, relationshipStatus]
+      );
+      console.log("Saved relationship", result.rows[0]);
+      savedRelationships.push(result.rows[0]);
+    }
+    console.log("Saved relationships", savedRelationships);
+    res.status(201).json({
+      message: "Relationships saved successfully",
+      relationships: savedRelationships,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error saving relationships", error });
+  }
+});
+
+app.patch("/relationships/:id", verifyToken, async (req, res) => {
+  console.log("Patching relationship");
+  const { userId } = req.user; // Authenticated user's ID
+  const { id } = req.params; // Relationship ID
+  const { relationship } = req.body; // Fields to update
+
+  console.log("Updating relationship", id, relationship);
+
+  // Validate that the relationship belongs to the authenticated user's game
+  const relationshipResult = await db.query(
+    `SELECT r.* 
+     FROM relationships r 
+     JOIN games g ON r.games_id = g.id 
+     WHERE r.id = $1 AND g.user_id = $2`,
+    [id, userId]
+  );
+
+  if (relationshipResult.rows.length === 0) {
+    return res
+      .status(403)
+      .json({ message: "Unauthorized or relationship not found" });
+  }
+
+  try {
+    const result = await db.query(
+      "UPDATE relationships SET age = $1, relationship = $2, relationship_status = $3 WHERE id = $4 RETURNING *",
+      [
+        relationship.age,
+        relationship.relationship,
+        relationship.relationship_status,
+        id,
+      ]
+    );
+    res.json({ message: "Relationship updated", relationship: result.rows[0] });
+  } catch (error) {
+    console.error("Error updating relationship:", error);
+    res.status(500).json({ message: "Error updating relationship" });
+  }
+});
 
 app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
 app.post("/generate-scenario", async (req, res) => {
-  const { gameState } = req.body;
-  console.log("Generating scenario for game state:", gameState);
-  const { scenario, choices } = await generateScenario(gameState);
-  res.json({ scenario, choices });
+  const { gameState, relationships } = req.body;
+  // console.log("Generating scenario for game state:", gameState);
+  // console.log("Scenario Relationships:", relationships);
+  try {
+    const { scenario, choices } = await generateScenario(
+      gameState,
+      relationships
+    );
+    res.json({ scenario, choices });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error generating scenario", error });
+  }
 });
 
 app.post("/evaluate-choice", async (req, res) => {
-  const { choice, scenario, gameState } = req.body;
-  const {
-    summary,
-    outcome,
-    notableLifeEvent,
-    lifeEventSummary,
-    newRelationships,
-    removedRelationships,
-  } = await evaluateChoice(choice, scenario, gameState);
-  res.json({
-    summary,
-    outcome,
-    notableLifeEvent,
-    lifeEventSummary,
-    newRelationships,
-    removedRelationships,
-  });
+  const { choice, scenario, gameState, relationships } = req.body;
+  try {
+    const {
+      summary,
+      outcome,
+      notableLifeEvent,
+      lifeEventSummary,
+      newRelationships,
+      removedRelationships,
+    } = await evaluateChoice(choice, scenario, gameState, relationships);
+    res.json({
+      summary,
+      outcome,
+      notableLifeEvent,
+      lifeEventSummary,
+      newRelationships,
+      removedRelationships,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error evaluating choice", error });
+  }
 });
 
 app.get("/generate-backstory", async (req, res) => {
@@ -103,13 +751,13 @@ const numberOfSiblingsProbabilities = [
   5, 5, 5, 6, 8, 10,
 ];
 
-async function generateScenario(gameState) {
+async function generateScenario(gameState, relationships) {
   const age = gameState.age;
-  const name = gameState.backstory?.name || "Unknown";
+  const name = gameState.name || "Unknown";
   let scenarioContext = "";
 
   if (age >= 0 && age <= 2) {
-    scenarioContext = `${name} is  ${age} years old and in the early childhood development stage. Present a choice that is relevant to the early childhood development stage, such as a choice between toys, first words, etc.`;
+    scenarioContext = `${name} is ${age} years old and in the early childhood development stage. Present a choice that is relevant to the early childhood development stage, such as a choice between toys, first words, etc.`;
   } else if (age >= 3 && age <= 5) {
     scenarioContext = `${name} is ${age} years old and in the preschool years. Present choices for the player as a decision that will cover the entire years for age 3-5.`;
   } else if (age >= 6 && age <= 12) {
@@ -134,7 +782,7 @@ Here is the character's life so far:
 ${gameState.history}
 
 ${
-  gameState.lifeEvents.length > 0
+  gameState.lifeEvents && gameState.lifeEvents.length > 0
     ? `Here are their current notable life events:\n${gameState.lifeEvents.join(
         "\n"
       )}`
@@ -142,7 +790,7 @@ ${
 }
 
 Here are their current relationships (relationship status is on a scale of 1-10, with 10 being pure love and 1 being hatred):
-${gameState.relationships
+${relationships
   .map(
     (relationship) =>
       ` ${relationship.relationship}: ${relationship.name} - Relationship status: ${relationship.relationshipStatus}`
@@ -211,70 +859,93 @@ Now create the scenario, choices, and choice stats in the appropriate XML format
     console.log("Generated Text:", generatedText);
     let scenario = "";
     let choices = [];
-    try {
-      // Parse the XML-style response
-      scenario = generatedText
-        .match(/<scenario>(.*?)<\/scenario>/s)?.[1]
-        .trim();
+    let tries = 0;
+    let success = false;
 
-      const choice1Stats = JSON.parse(
-        generatedText.match(/<choice1Stats>(.*?)<\/choice1Stats>/s)?.[1].trim()
-      );
-      const choice2Stats = JSON.parse(
-        generatedText.match(/<choice2Stats>(.*?)<\/choice2Stats>/s)?.[1].trim()
-      );
-      const choice3Stats = JSON.parse(
-        generatedText.match(/<choice3Stats>(.*?)<\/choice3Stats>/s)?.[1].trim()
-      );
+    while (!success && tries < 3) {
+      tries += 1;
+      console.log("Trying to parse scenario", tries);
+      try {
+        // Parse the XML-style response
+        scenario = generatedText
+          .match(/<scenario>(.*?)<\/scenario>/s)?.[1]
+          .trim();
 
-      choices = [
-        {
-          choiceText: generatedText
-            .match(/<choice1>(.*?)<\/choice1>/s)?.[1]
-            .trim(),
-          healthEffect: choice1Stats.Health,
-          charismaEffect: choice1Stats.Charisma,
-          happinessEffect: choice1Stats.Happiness,
-          fitnessEffect: choice1Stats.Fitness,
-          creativityEffect: choice1Stats.Creativity,
-          intelligenceEffect: choice1Stats.Intelligence,
-        },
-        {
-          choiceText: generatedText
-            .match(/<choice2>(.*?)<\/choice2>/s)?.[1]
-            .trim(),
-          healthEffect: choice2Stats.Health,
-          charismaEffect: choice2Stats.Charisma,
-          happinessEffect: choice2Stats.Happiness,
-          fitnessEffect: choice2Stats.Fitness,
-          creativityEffect: choice2Stats.Creativity,
-          intelligenceEffect: choice2Stats.Intelligence,
-        },
-        {
-          choiceText: generatedText
-            .match(/<choice3>(.*?)<\/choice3>/s)?.[1]
-            .trim(),
-          healthEffect: choice3Stats.Health,
-          charismaEffect: choice3Stats.Charisma,
-          happinessEffect: choice3Stats.Happiness,
-          fitnessEffect: choice3Stats.Fitness,
-          creativityEffect: choice3Stats.Creativity,
-          intelligenceEffect: choice3Stats.Intelligence,
-        },
-      ];
-    } catch (error) {
-      console.error("Error parsing XML-style response:", error);
-      return null;
+        const choice1Stats = JSON.parse(
+          generatedText
+            .match(/<choice1Stats>(.*?)<\/choice1Stats>/s)?.[1]
+            .trim()
+        );
+        const choice2Stats = JSON.parse(
+          generatedText
+            .match(/<choice2Stats>(.*?)<\/choice2Stats>/s)?.[1]
+            .trim()
+        );
+        const choice3Stats = JSON.parse(
+          generatedText
+            .match(/<choice3Stats>(.*?)<\/choice3Stats>/s)?.[1]
+            .trim()
+        );
+
+        choices = [
+          {
+            choiceText: generatedText
+              .match(/<choice1>(.*?)<\/choice1>/s)?.[1]
+              .trim(),
+            healthEffect: choice1Stats.Health,
+            charismaEffect: choice1Stats.Charisma,
+            happinessEffect: choice1Stats.Happiness,
+            fitnessEffect: choice1Stats.Fitness,
+            creativityEffect: choice1Stats.Creativity,
+            intelligenceEffect: choice1Stats.Intelligence,
+          },
+          {
+            choiceText: generatedText
+              .match(/<choice2>(.*?)<\/choice2>/s)?.[1]
+              .trim(),
+            healthEffect: choice2Stats.Health,
+            charismaEffect: choice2Stats.Charisma,
+            happinessEffect: choice2Stats.Happiness,
+            fitnessEffect: choice2Stats.Fitness,
+            creativityEffect: choice2Stats.Creativity,
+            intelligenceEffect: choice2Stats.Intelligence,
+          },
+          {
+            choiceText: generatedText
+              .match(/<choice3>(.*?)<\/choice3>/s)?.[1]
+              .trim(),
+            healthEffect: choice3Stats.Health,
+            charismaEffect: choice3Stats.Charisma,
+            happinessEffect: choice3Stats.Happiness,
+            fitnessEffect: choice3Stats.Fitness,
+            creativityEffect: choice3Stats.Creativity,
+            intelligenceEffect: choice3Stats.Intelligence,
+          },
+        ];
+        success = true;
+      } catch (error) {
+        console.error("Error parsing XML-style response:", error);
+      }
     }
 
     return { scenario, choices };
   } catch (error) {
     console.error("Error generating scenario:", error);
-    return null;
+    return { error: error.message };
   }
 }
 
-async function evaluateChoice(choice, scenario, gameState) {
+async function evaluateChoice(
+  choice,
+  scenario,
+  gameState,
+  relationships,
+  tryCount = 0
+) {
+  if (tryCount >= 3) {
+    console.error("Failed to evaluate choice after 3 tries");
+    return null;
+  }
   const prompt = `
 You are part of a life simulation game where you are evaluating the choices of a character.
 
@@ -290,13 +961,13 @@ Creativity: ${gameState.stats.creativity} / 100
 Net Worth: ${gameState.netWorth}
 
 Here is the character's life so far:
-${gameState.backstory.history}
+${gameState.history}
 
 Here are their current notable life events:
 ${gameState.lifeEvents}
 
 Here is their current relationships:
-${gameState.relationships}
+${relationships}
 
 Here is the scenario that the character is in:
 ${scenario}
@@ -364,90 +1035,103 @@ Again, only add a relationship to the <removedRelationships> tags if it is a per
     if (!response.ok) {
       throw new Error("Failed to evaluate choice");
     }
+    try {
+      const data = await response.json();
+      const generatedText = data.candidates[0].content.parts[0].text;
 
-    const data = await response.json();
-    const generatedText = data.candidates[0].content.parts[0].text;
+      console.log("Generated Text:", generatedText);
 
-    console.log("Generated Text:", generatedText);
+      // Parse the XML-style response
 
-    // Parse the XML-style response
+      let summary = "";
+      let outcome = "";
+      let notableLifeEvent = "";
+      let lifeEventSummary = "";
+      let newRelationships = "";
+      let removedRelationships = "";
+      summary = generatedText.match(/<summary>(.*?)<\/summary>/s)?.[1].trim();
+      outcome = generatedText.match(/<outcome>(.*?)<\/outcome>/s)?.[1].trim();
+      notableLifeEvent = generatedText
+        .match(/<notableLifeEvent>(.*?)<\/notableLifeEvent>/s)?.[1]
+        .trim();
+      lifeEventSummary = generatedText
+        .match(/<lifeEventSummary>(.*?)<\/lifeEventSummary>/s)?.[1]
+        .trim();
+      newRelationships = generatedText
+        .match(/<newRelationships>(.*?)<\/newRelationships>/s)?.[1]
+        .trim();
+      removedRelationships = generatedText
+        .match(/<removedRelationships>(.*?)<\/removedRelationships>/s)?.[1]
+        .trim();
 
-    let summary = "";
-    let outcome = "";
-    let notableLifeEvent = "";
-    let lifeEventSummary = "";
-    let newRelationships = "";
-    let removedRelationships = "";
-    summary = generatedText.match(/<summary>(.*?)<\/summary>/s)?.[1].trim();
-    outcome = generatedText.match(/<outcome>(.*?)<\/outcome>/s)?.[1].trim();
-    notableLifeEvent = generatedText
-      .match(/<notableLifeEvent>(.*?)<\/notableLifeEvent>/s)?.[1]
-      .trim();
-    lifeEventSummary = generatedText
-      .match(/<lifeEventSummary>(.*?)<\/lifeEventSummary>/s)?.[1]
-      .trim();
-    newRelationships = generatedText
-      .match(/<newRelationships>(.*?)<\/newRelationships>/s)?.[1]
-      .trim();
-    removedRelationships = generatedText
-      .match(/<removedRelationships>(.*?)<\/removedRelationships>/s)?.[1]
-      .trim();
+      let newRelationshipsArray = [];
 
-    let newRelationshipsArray = [];
-
-    newRelationshipsArray = newRelationships
-      ? newRelationships.split("</relationship>").map((relationship) => {
-          console.log("Relationship", relationship);
-          const parts = relationship.split("</");
-          console.log("Parts", parts);
-          const newAge = parts[0].match(/<age>(.*?)<\/age>/s)?.[1].trim();
-          console.log("New Age", newAge);
-          return {
-            name: parts[0].match(/<name>(.*?)<\/name>/s)?.[1].trim(),
-            age: Number(newAge),
-            gender: parts[0].match(/<gender>(.*?)<\/gender>/s)?.[1].trim(),
-            relationshipType: parts[0]
-              .match(/<relationshipType>(.*?)<\/relationshipType>/s)?.[1]
-              .trim(),
-            relationshipStatus: parts[0]
-              .match(/<relationshipStatus>(.*?)<\/relationshipStatus>/s)?.[1]
-              .trim(),
-          };
-        })
-      : [];
-
-    console.log("New Relationships", newRelationshipsArray);
-
-    let removedRelationshipsArray = [];
-    removedRelationshipsArray = removedRelationships
-      ? removedRelationships
-          .split("</removedRelationship>")
-          .map((relationship) => {
+      newRelationshipsArray = newRelationships
+        ? newRelationships.split("</relationship>").map((relationship) => {
+            console.log("Relationship", relationship);
             const parts = relationship.split("</");
+            console.log("Parts", parts);
+            const newAge = parts[0].match(/<age>(.*?)<\/age>/s)?.[1].trim();
+            console.log("New Age", newAge);
             return {
               name: parts[0].match(/<name>(.*?)<\/name>/s)?.[1].trim(),
-              reason: parts[0].match(/<reason>(.*?)<\/reason>/s)?.[1].trim(),
+              age: Number(newAge),
+              gender: parts[0].match(/<gender>(.*?)<\/gender>/s)?.[1].trim(),
+              relationshipType: parts[0]
+                .match(/<relationshipType>(.*?)<\/relationshipType>/s)?.[1]
+                .trim(),
+              relationshipStatus: parts[0]
+                .match(/<relationshipStatus>(.*?)<\/relationshipStatus>/s)?.[1]
+                .trim(),
             };
           })
-      : [];
+        : [];
 
-    console.log("Removed Relationships", removedRelationshipsArray);
+      console.log("New Relationships", newRelationshipsArray);
 
-    return {
-      summary,
-      outcome,
-      notableLifeEvent,
-      lifeEventSummary,
-      newRelationshipsArray,
-      removedRelationshipsArray,
-    };
+      let removedRelationshipsArray = [];
+      removedRelationshipsArray = removedRelationships
+        ? removedRelationships
+            .split("</removedRelationship>")
+            .map((relationship) => {
+              const parts = relationship.split("</");
+              return {
+                name: parts[0].match(/<name>(.*?)<\/name>/s)?.[1].trim(),
+                reason: parts[0].match(/<reason>(.*?)<\/reason>/s)?.[1].trim(),
+              };
+            })
+        : [];
+
+      console.log("Removed Relationships", removedRelationshipsArray);
+
+      return {
+        summary,
+        outcome,
+        notableLifeEvent,
+        lifeEventSummary,
+        newRelationshipsArray,
+        removedRelationshipsArray,
+      };
+    } catch (error) {
+      return evaluateChoice(
+        choice,
+        scenario,
+        gameState,
+        relationships,
+        tryCount + 1
+      );
+    }
   } catch (error) {
     console.error("Error evaluating choice:", error);
     return null;
   }
 }
 
-async function generateBackstory() {
+async function generateBackstory(tryCount = 0) {
+  if (tryCount >= 3) {
+    console.error("Failed to generate backstory after 3 tries");
+    return { error: "Failed to generate backstory" };
+  }
   const numberOfSiblings =
     numberOfSiblingsProbabilities[
       Math.floor(Math.random() * numberOfSiblingsProbabilities.length)
@@ -648,7 +1332,6 @@ Example 2:
       siblings,
     };
   } catch (error) {
-    console.error("Error generating backstory:", error);
-    return null;
+    return generateBackstory(tryCount + 1);
   }
 }
