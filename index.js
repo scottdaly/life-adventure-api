@@ -751,7 +751,11 @@ const numberOfSiblingsProbabilities = [
   5, 5, 5, 6, 8, 10,
 ];
 
-async function generateScenario(gameState, relationships) {
+async function generateScenario(gameState, relationships, tryCount = 0) {
+  if (tryCount >= 3) {
+    console.error("Failed to generate scenario after 3 tries");
+    return { error: "Failed to generate scenario after 3 tries" };
+  }
   const age = gameState.age;
   const name = gameState.name || "Unknown";
   let scenarioContext = "";
@@ -793,7 +797,7 @@ Here are their current relationships (relationship status is on a scale of 1-10,
 ${relationships
   .map(
     (relationship) =>
-      ` ${relationship.relationship}: ${relationship.name} - Relationship status: ${relationship.relationshipStatus}`
+      ` ${relationship.relationship}: ${relationship.name} - Relationship status: ${relationship.relationship_status}`
   )
   .join("\n")}
 
@@ -859,79 +863,60 @@ Now create the scenario, choices, and choice stats in the appropriate XML format
     console.log("Generated Text:", generatedText);
     let scenario = "";
     let choices = [];
-    let tries = 0;
-    let success = false;
 
-    while (!success && tries < 3) {
-      tries += 1;
-      console.log("Trying to parse scenario", tries);
-      try {
-        // Parse the XML-style response
-        scenario = generatedText
-          .match(/<scenario>(.*?)<\/scenario>/s)?.[1]
-          .trim();
+    // Parse the XML-style response
+    scenario = generatedText.match(/<scenario>(.*?)<\/scenario>/s)?.[1].trim();
 
-        const choice1Stats = JSON.parse(
-          generatedText
-            .match(/<choice1Stats>(.*?)<\/choice1Stats>/s)?.[1]
-            .trim()
-        );
-        const choice2Stats = JSON.parse(
-          generatedText
-            .match(/<choice2Stats>(.*?)<\/choice2Stats>/s)?.[1]
-            .trim()
-        );
-        const choice3Stats = JSON.parse(
-          generatedText
-            .match(/<choice3Stats>(.*?)<\/choice3Stats>/s)?.[1]
-            .trim()
-        );
+    const choice1Stats = JSON.parse(
+      generatedText.match(/<choice1Stats>(.*?)<\/choice1Stats>/s)?.[1].trim()
+    );
+    const choice2Stats = JSON.parse(
+      generatedText.match(/<choice2Stats>(.*?)<\/choice2Stats>/s)?.[1].trim()
+    );
+    const choice3Stats = JSON.parse(
+      generatedText.match(/<choice3Stats>(.*?)<\/choice3Stats>/s)?.[1].trim()
+    );
 
-        choices = [
-          {
-            choiceText: generatedText
-              .match(/<choice1>(.*?)<\/choice1>/s)?.[1]
-              .trim(),
-            healthEffect: choice1Stats.Health,
-            charismaEffect: choice1Stats.Charisma,
-            happinessEffect: choice1Stats.Happiness,
-            fitnessEffect: choice1Stats.Fitness,
-            creativityEffect: choice1Stats.Creativity,
-            intelligenceEffect: choice1Stats.Intelligence,
-          },
-          {
-            choiceText: generatedText
-              .match(/<choice2>(.*?)<\/choice2>/s)?.[1]
-              .trim(),
-            healthEffect: choice2Stats.Health,
-            charismaEffect: choice2Stats.Charisma,
-            happinessEffect: choice2Stats.Happiness,
-            fitnessEffect: choice2Stats.Fitness,
-            creativityEffect: choice2Stats.Creativity,
-            intelligenceEffect: choice2Stats.Intelligence,
-          },
-          {
-            choiceText: generatedText
-              .match(/<choice3>(.*?)<\/choice3>/s)?.[1]
-              .trim(),
-            healthEffect: choice3Stats.Health,
-            charismaEffect: choice3Stats.Charisma,
-            happinessEffect: choice3Stats.Happiness,
-            fitnessEffect: choice3Stats.Fitness,
-            creativityEffect: choice3Stats.Creativity,
-            intelligenceEffect: choice3Stats.Intelligence,
-          },
-        ];
-        success = true;
-      } catch (error) {
-        console.error("Error parsing XML-style response:", error);
-      }
-    }
+    choices = [
+      {
+        choiceText: generatedText
+          .match(/<choice1>(.*?)<\/choice1>/s)?.[1]
+          .trim(),
+        healthEffect: choice1Stats.Health,
+        charismaEffect: choice1Stats.Charisma,
+        happinessEffect: choice1Stats.Happiness,
+        fitnessEffect: choice1Stats.Fitness,
+        creativityEffect: choice1Stats.Creativity,
+        intelligenceEffect: choice1Stats.Intelligence,
+      },
+      {
+        choiceText: generatedText
+          .match(/<choice2>(.*?)<\/choice2>/s)?.[1]
+          .trim(),
+        healthEffect: choice2Stats.Health,
+        charismaEffect: choice2Stats.Charisma,
+        happinessEffect: choice2Stats.Happiness,
+        fitnessEffect: choice2Stats.Fitness,
+        creativityEffect: choice2Stats.Creativity,
+        intelligenceEffect: choice2Stats.Intelligence,
+      },
+      {
+        choiceText: generatedText
+          .match(/<choice3>(.*?)<\/choice3>/s)?.[1]
+          .trim(),
+        healthEffect: choice3Stats.Health,
+        charismaEffect: choice3Stats.Charisma,
+        happinessEffect: choice3Stats.Happiness,
+        fitnessEffect: choice3Stats.Fitness,
+        creativityEffect: choice3Stats.Creativity,
+        intelligenceEffect: choice3Stats.Intelligence,
+      },
+    ];
 
     return { scenario, choices };
   } catch (error) {
     console.error("Error generating scenario:", error);
-    return { error: error.message };
+    return generateScenario(gameState, relationships, tryCount + 1);
   }
 }
 
@@ -966,7 +951,7 @@ ${gameState.history}
 Here are their current notable life events:
 ${gameState.lifeEvents}
 
-Here is their current relationships:
+Here are their current relationships:
 ${relationships}
 
 Here is the scenario that the character is in:
