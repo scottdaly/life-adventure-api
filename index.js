@@ -594,7 +594,7 @@ app.post("/relationships", verifyToken, async (req, res) => {
       } = relationship;
 
       const result = await db.query(
-        `INSERT INTO relationships (games_id, name, age, gender, relationship, relationship_status)
+        `INSERT INTO relationships (game_id, name, age, gender, relationship_type, relationship_status)
          VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
         [gameId, name, age, gender, relationshipType, relationshipStatus]
       );
@@ -624,7 +624,7 @@ app.patch("/relationships/:id", verifyToken, async (req, res) => {
   const relationshipResult = await db.query(
     `SELECT r.* 
      FROM relationships r 
-     JOIN games g ON r.games_id = g.id 
+     JOIN games g ON r.game_id = g.id 
      WHERE r.id = $1 AND g.user_id = $2`,
     [id, userId]
   );
@@ -637,7 +637,7 @@ app.patch("/relationships/:id", verifyToken, async (req, res) => {
 
   try {
     const result = await db.query(
-      "UPDATE relationships SET age = $1, relationship = $2, relationship_status = $3 WHERE id = $4 RETURNING *",
+      "UPDATE relationships SET age = $1, relationship_type = $2, relationship_status = $3, updated_at = NOW() WHERE id = $4 RETURNING *",
       [
         relationship.age,
         relationship.relationship,
@@ -754,93 +754,48 @@ const numberOfSiblingsProbabilities = [
 async function generateScenario(gameState, relationships, tryCount = 0) {
   if (tryCount >= 3) {
     console.error("Failed to generate scenario after 3 tries");
-    return { error: "Failed to generate scenario after 3 tries" };
+    return null;
   }
-  const age = gameState.age;
-  const name = gameState.name || "Unknown";
-  let scenarioContext = "";
 
-  if (age >= 0 && age <= 2) {
-    scenarioContext = `${name} is ${age} years old and in the early childhood development stage. Present a choice that is relevant to the early childhood development stage, such as a choice between toys, first words, etc.`;
-  } else if (age >= 3 && age <= 5) {
-    scenarioContext = `${name} is ${age} years old and in the preschool years. Present choices for the player as a decision that will cover the entire years for age 3-5.`;
-  } else if (age >= 6 && age <= 12) {
-    scenarioContext = `${name} is ${age} years old and in the elementary school years. Present choices for the player as a decision that will cover the entire years for age 6-12.`;
-  } else {
-    scenarioContext = `${name} is ${age} years old.`;
-  }
+  // Ensure relationships is an array
+  const safeRelationships = Array.isArray(relationships) ? relationships : [];
+  
+  const name = gameState?.name || "Unknown";
+  const age = gameState?.age || 0;
+  const stats = gameState?.stats || {};
+  const history = Array.isArray(gameState?.history) ? gameState.history : [];
+  const lifeEvents = Array.isArray(gameState?.lifeEvents) ? gameState.lifeEvents : [];
 
   const prompt = `
-Generate an age-appropriate scenario and three choices for a life simulation game. Here are the current stats of the character:
-Name: ${name}
-Age: ${gameState.age}
-Health: ${gameState.stats.health} / 100 (100 is perfect health)
-Intelligence: ${gameState.stats.intelligence} / 100
-Charisma: ${gameState.stats.charisma} / 100
-Happiness: ${gameState.stats.happiness} / 100
-Fitness: ${gameState.stats.fitness} / 100
-Creativity: ${gameState.stats.creativity} / 100
-Net Worth: ${gameState.netWorth}
+    You are generating a scenario for ${name} who is ${age} years old.
+    Their current stats are:
+    Health: ${stats.health || 0}
+    Intelligence: ${stats.intelligence || 0}
+    Charisma: ${stats.charisma || 0}
+    Happiness: ${stats.happiness || 0}
+    Fitness: ${stats.fitness || 0}
+    Creativity: ${stats.creativity || 0}
 
-Here is the character's life so far:
-${gameState.history}
+    Their relationships are:
+    ${safeRelationships.map(r => 
+      `${r.name} (${r.relationshipType}): Relationship level ${r.relationshipStatus}`
+    ).join('\n')}
 
-${
-  gameState.lifeEvents && gameState.lifeEvents.length > 0
-    ? `Here are their current notable life events:\n${gameState.lifeEvents.join(
-        "\n"
-      )}`
-    : ""
-}
+    Recent history:
+    ${history.slice(-3).join('\n')}
 
-Here are their current relationships (relationship status is on a scale of 1-10, with 10 being pure love and 1 being hatred):
-${relationships
-  .map(
-    (relationship) =>
-      ` ${relationship.relationship}: ${relationship.name} - Relationship status: ${relationship.relationship_status}`
-  )
-  .join("\n")}
+    Notable life events:
+    ${lifeEvents.join('\n')}
 
-${scenarioContext}
-
-Always refer to the character as "you" in the scenario.
-
-For each choice, provide the consequences of the choices on each of the character's stats as a json object where each stat is a value between 1 and 5 with the following format:
-{
-"Health": 1-5,
-  "Charisma": 1-5,
-  "Happiness": 1-5,
-  "Fitness": 1-5,
-  "Creativity": 1-5,
-  "Intelligence": 1-5,
-}
-  For each choice, follow this guide when determining the change in stats:
-  - A score of 1 indicates the result of a significant decrease in the stat
-  - A score of 2 indicates the result of a moderate decrease in the stat
-  - A score of 3 indicates the choice had no change on the stat
-  - A score of 4 indicates the result of a moderate increase in the stat
-  - A score of 5 indicates the result of a significant increase in the stat
-
-You should consider the gravity of the choice they are making and the potential consequences on their stats. The gravity of the situation they are choosing should be determined by the character's age. For example, a choice an 18 year old makes might be more serious than a choice a 13 year old makes, but if your parents are getting divorced or something serious happens when you are 5, then that would be a more serious choice for a 5 year old than for an 18 year old. But generally speaking, match the gravity of the choice to the life situation, age, and circumstances of the character.
-
-Provide your response using the following XML-style tags:
-<scenario>Description of the scenario</scenario>
-<choice1>Choice 1</choice1>
-<choice1Stats>JSON object with the change in stats for choice 1</choice1Stats>
-<choice2>Choice 2</choice2>
-<choice2Stats>JSON object with the change in stats for choice 2</choice2Stats>
-<choice3>Choice 3</choice3>
-<choice3Stats>JSON object with the change in stats for choice 3</choice3Stats>
-
-Be sure to always structure the Choice Stats as a JSON object with the keys being the stat name and the values being the change in stats, and to always include all 6 stats, such as:
-<choice1Stats>{"Health": 3, "Charisma": 3, "Happiness": 3, "Fitness": 3, "Creativity": 3, "Intelligence": 3}</choice1Stats> (This would be a choice that had no effect on the stats)
-or
-<choice2Stats>{"Health": 3, "Charisma": 3, "Happiness": 1, "Fitness": 4, "Creativity": 3, "Intelligence": 3}</choice2Stats> (This would be a choice that resulted in a significant decrease in happiness and a moderate increase in fitness, and no effect in the other stats)
-
-Now create the scenario, choices, and choice stats in the appropriate XML format for ${name} who is ${age} years old.
-`;
-
-  console.log("Prompt for scenario:", prompt);
+    Generate a scenario with three choices. Format your response using XML tags:
+    <scenario>Describe the scenario</scenario>
+    <choice1>First choice</choice1>
+    <choice1Stats>{"Health": 3, "Intelligence": 3, "Charisma": 3, "Happiness": 3, "Fitness": 3, "Creativity": 3}</choice1Stats>
+    <choice2>Second choice</choice2>
+    <choice2Stats>{"Health": 3, "Intelligence": 3, "Charisma": 3, "Happiness": 3, "Fitness": 3, "Creativity": 3}</choice2Stats>
+    <choice3>Third choice</choice3>
+    <choice3Stats>{"Health": 3, "Intelligence": 3, "Charisma": 3, "Happiness": 3, "Fitness": 3, "Creativity": 3}</choice3Stats>
+  `;
 
   try {
     const response = await fetch(`${API_ENDPOINT}?key=${GOOGLE_API_KEY}`, {
@@ -1001,6 +956,8 @@ The <removedRelationships> tags should be formatted like this:
   <name>Name of the person</name>
   <reason>Reason for removal of the relationship</reason>
 </removedRelationship>
+
+Do not add any other types of tags or any additional information.
 Again, only add a relationship to the <removedRelationships> tags if it is a person who was in the character's relationships I initially provided, and they no longer interact with them on a regular basis. Their name should be exactly as it was in the initial relationships I provided.
 `;
 
