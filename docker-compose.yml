@@ -2,7 +2,8 @@ services:
   app:
     build: .
     ports:
-      - "3000:3000"
+      - "127.0.0.1:4000:4000" # Only expose locally, Caddy will proxy
+    restart: always
     environment:
       - DATABASE_URL=postgresql://user:password@db:5432/myapp
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -12,9 +13,10 @@ services:
       - db
   db:
     image: postgres:13
+    restart: always
     environment:
       - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=password
+      - POSTGRES_PASSWORD=password # Change this to a strong password
       - POSTGRES_DB=myapp
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -22,8 +24,9 @@ services:
 
   adminer:
     image: adminer
+    restart: always
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080" # Only expose locally for security
 
 volumes:
   postgres_data:

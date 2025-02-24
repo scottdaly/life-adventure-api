@@ -8,7 +8,7 @@ const db = require("./db"); // Import the database connection
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
-const port = 3000;
+const port = 4000;
 const cookieParser = require("cookie-parser");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
@@ -759,12 +759,14 @@ async function generateScenario(gameState, relationships, tryCount = 0) {
 
   // Ensure relationships is an array
   const safeRelationships = Array.isArray(relationships) ? relationships : [];
-  
+
   const name = gameState?.name || "Unknown";
   const age = gameState?.age || 0;
   const stats = gameState?.stats || {};
   const history = Array.isArray(gameState?.history) ? gameState.history : [];
-  const lifeEvents = Array.isArray(gameState?.lifeEvents) ? gameState.lifeEvents : [];
+  const lifeEvents = Array.isArray(gameState?.lifeEvents)
+    ? gameState.lifeEvents
+    : [];
 
   const prompt = `
     You are generating a scenario for ${name} who is ${age} years old.
@@ -777,15 +779,18 @@ async function generateScenario(gameState, relationships, tryCount = 0) {
     Creativity: ${stats.creativity || 0}
 
     Their relationships are:
-    ${safeRelationships.map(r => 
-      `${r.name} (${r.relationshipType}): Relationship level ${r.relationshipStatus}`
-    ).join('\n')}
+    ${safeRelationships
+      .map(
+        (r) =>
+          `${r.name} (${r.relationshipType}): Relationship level ${r.relationshipStatus}`
+      )
+      .join("\n")}
 
     Recent history:
-    ${history.slice(-3).join('\n')}
+    ${history.slice(-3).join("\n")}
 
     Notable life events:
-    ${lifeEvents.join('\n')}
+    ${lifeEvents.join("\n")}
 
     Generate a scenario with three choices. Format your response using XML tags:
     <scenario>Describe the scenario</scenario>
