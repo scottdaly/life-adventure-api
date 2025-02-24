@@ -13,6 +13,8 @@ const cookieParser = require("cookie-parser");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
+const apiRouter = express.Router();
+
 const GOOGLE_API_KEY = process.env.GEMINI_API_KEY;
 const API_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
@@ -107,16 +109,16 @@ passport.use(
 
 // Routes
 
-app.get("/test", (req, res) => {
+apiRouter.get("/test", (req, res) => {
   res.send("Hello World");
 });
 
-app.get(
+apiRouter.get(
   "/auth/google",
   passport.authenticate("google", { scope: ["profile", "email"] })
 );
 
-app.get(
+apiRouter.get(
   "/auth/google/callback",
   passport.authenticate("google", { session: false }),
   async (req, res) => {
@@ -144,7 +146,7 @@ app.get(
 );
 
 // Local registration route
-app.post("/auth/register", async (req, res) => {
+apiRouter.post("/auth/register", async (req, res) => {
   const { email, password } = req.body;
   console.log("Registering user", email, password);
   try {
@@ -182,7 +184,7 @@ app.post("/auth/register", async (req, res) => {
 });
 
 // Local login route
-app.post("/auth/login", async (req, res) => {
+apiRouter.post("/auth/login", async (req, res) => {
   const { email, password } = req.body;
   console.log("Logging in with email", email);
   try {
@@ -257,7 +259,7 @@ const verifyToken = (req, res, next) => {
 };
 
 // Token refresh route
-app.post("/auth/refresh-token", async (req, res) => {
+apiRouter.post("/auth/refresh-token", async (req, res) => {
   const refreshToken = req.cookies.refreshToken;
   if (!refreshToken)
     return res.status(401).json({ error: "Refresh token not found" });
@@ -299,7 +301,7 @@ app.post("/auth/refresh-token", async (req, res) => {
 });
 
 // Logout route
-app.get("/auth/logout", async (req, res) => {
+apiRouter.get("/auth/logout", async (req, res) => {
   const refreshToken = req.cookies.refreshToken;
   if (refreshToken) {
     await db.query(
@@ -313,7 +315,7 @@ app.get("/auth/logout", async (req, res) => {
 });
 
 // User info route
-app.get("/api/user", verifyToken, async (req, res) => {
+apiRouter.get("/api/user", verifyToken, async (req, res) => {
   console.log("Getting user info");
   try {
     const result = await db.query(
@@ -332,7 +334,7 @@ app.get("/api/user", verifyToken, async (req, res) => {
 /* User Routes */
 
 // List all users
-app.get("/users", async (req, res) => {
+apiRouter.get("/users", async (req, res) => {
   console.log("getting users");
   try {
     const result = await db.query("SELECT * FROM users");
@@ -344,7 +346,7 @@ app.get("/users", async (req, res) => {
 });
 
 // Create a new user
-app.post("/users", async (req, res) => {
+apiRouter.post("/users", async (req, res) => {
   console.log("posting to users");
   const { email, password } = req.body;
 
@@ -369,7 +371,7 @@ app.post("/users", async (req, res) => {
 });
 
 // Update a user's details
-app.patch("/users/:id", async (req, res) => {
+apiRouter.patch("/users/:id", async (req, res) => {
   console.log("patching to users");
   const { id } = req.params;
   const { email, password } = req.body;
@@ -407,7 +409,7 @@ app.patch("/users/:id", async (req, res) => {
 });
 
 // Delete a user
-app.delete("/users/:id", async (req, res) => {
+apiRouter.delete("/users/:id", async (req, res) => {
   console.log("deleting user");
   const { id } = req.params;
 
@@ -433,7 +435,7 @@ app.delete("/users/:id", async (req, res) => {
 
 /* Game Routes */
 
-app.get("/games", verifyToken, async (req, res) => {
+apiRouter.get("/games", verifyToken, async (req, res) => {
   const userId = req.user.userId;
   console.log("Getting games for user", userId);
   try {
@@ -448,7 +450,7 @@ app.get("/games", verifyToken, async (req, res) => {
   }
 });
 
-app.post("/save-game", verifyToken, async (req, res) => {
+apiRouter.post("/save-game", verifyToken, async (req, res) => {
   const userId = req.user.userId;
   const {
     age,
@@ -490,7 +492,7 @@ app.post("/save-game", verifyToken, async (req, res) => {
   }
 });
 
-app.put("/save-game", verifyToken, async (req, res) => {
+apiRouter.put("/save-game", verifyToken, async (req, res) => {
   console.log("Putting game state");
   const userId = req.user.userId;
   const {
@@ -541,7 +543,7 @@ app.put("/save-game", verifyToken, async (req, res) => {
   }
 });
 
-app.delete("/save-game", verifyToken, async (req, res) => {
+apiRouter.delete("/save-game", verifyToken, async (req, res) => {
   const userId = req.user.userId;
   const { gameId } = req.body;
   try {
@@ -556,7 +558,7 @@ app.delete("/save-game", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/relationships", verifyToken, async (req, res) => {
+apiRouter.get("/relationships", verifyToken, async (req, res) => {
   const userId = req.user.userId;
   const { gameId } = req.query;
   try {
@@ -571,7 +573,7 @@ app.get("/relationships", verifyToken, async (req, res) => {
   }
 });
 
-app.post("/relationships", verifyToken, async (req, res) => {
+apiRouter.post("/relationships", verifyToken, async (req, res) => {
   const { userId } = req.user; // Authenticated user's ID
   const { relationships, gameId } = req.body; // relationships will be an array of relationship objects
 
@@ -617,7 +619,7 @@ app.post("/relationships", verifyToken, async (req, res) => {
   }
 });
 
-app.patch("/relationships/:id", verifyToken, async (req, res) => {
+apiRouter.patch("/relationships/:id", verifyToken, async (req, res) => {
   console.log("Patching relationship");
   const { userId } = req.user; // Authenticated user's ID
   const { id } = req.params; // Relationship ID
@@ -657,11 +659,11 @@ app.patch("/relationships/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => {
+apiRouter.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
-app.post("/generate-scenario", async (req, res) => {
+apiRouter.post("/generate-scenario", async (req, res) => {
   const { gameState, relationships } = req.body;
   // console.log("Generating scenario for game state:", gameState);
   // console.log("Scenario Relationships:", relationships);
@@ -677,7 +679,7 @@ app.post("/generate-scenario", async (req, res) => {
   }
 });
 
-app.post("/evaluate-choice", async (req, res) => {
+apiRouter.post("/evaluate-choice", async (req, res) => {
   const { choice, scenario, gameState, relationships } = req.body;
   try {
     const {
@@ -702,7 +704,7 @@ app.post("/evaluate-choice", async (req, res) => {
   }
 });
 
-app.get("/generate-backstory", async (req, res) => {
+apiRouter.get("/generate-backstory", async (req, res) => {
   const {
     name,
     gender,
@@ -729,10 +731,6 @@ app.get("/generate-backstory", async (req, res) => {
     fatherRelationship,
     siblings,
   });
-});
-
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
 });
 
 const numberOfSiblingsProbabilities = [
@@ -1287,3 +1285,9 @@ Example 2:
     return generateBackstory(tryCount + 1);
   }
 }
+
+app.use("/api", apiRouter);
+
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
+});
