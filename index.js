@@ -30,6 +30,7 @@ app.use(
 
 app.use(express.json());
 app.use(cookieParser());
+app.set("trust proxy", true);
 
 app.use(passport.initialize());
 
